@@ -1,0 +1,27 @@
+Annotate a pair of input sentences. The goal is to label every word in each sentence regarding its
+semantic similarity to the words in the other sentence.
+## Example 1:
+Input sentence 1: ["Iran", "hopes", "nuclear", "talks", "will", "yield", "ˋ", "roadmap", "’"]
+Input sentence 2: ["Iran", "Nuclear", "Talks", "in", "Geneva", "Spur", "High", "Hopes"]
+Output: {"sentence1": [["Iran", 5], ["hopes", 4], ["nuclear", 5], ["talks", 5], ["will", 3], ["yield", 3], ["ˋ", -1], ["roadmap", 2], ["’", -1]], "sentence2": [["Iran", 5], ["Nuclear", 5], ["Talks", 5], ["in", 0], ["Geneva", 0], ["Spur", 3], ["High", 2], ["Hopes", 2]]}
+## Example 2:
+Input sentence 1: ["Books", "To", "Help", "Kids", "Talk", "About", "Boston", "Marathon", "News"]
+Input sentence 2: ["Report", "of", "2", "explosions", "at", "finish", "line", "of", "Boston", "Marathon"]
+Output: {"sentence1": [["Books", 1], ["To", 0], ["Help", 0], ["Kids", 0], ["Talk", 0], ["About", 4], ["Boston", 4], ["Marathon", 4], ["News", 4]], "sentence2": [["Report", 1], ["of", 0], ["2", 0], ["explosions", 0], ["at", 0], ["finish", 0], ["line", 0], ["of", 4], ["Boston", 4], ["Marathon", 4]]}
+## Example 3:
+Input sentence 1: ["Chinese", "shares", "close", "lower", "Wednesday"]
+Input sentence 2: ["Chinese", "shares", "close", "higher", "Friday"]
+Output: {"sentence1": [["Chinese", 5], ["shares", 5], ["close", 5], ["lower", 0], ["Wednesday", 3]], "sentence2": [["Chinese", 5], ["shares", 5], ["close", 5], ["higher", 0], ["Friday", 3]]}
+## Score scale
+• 5: Complete equivalence
+• 3-4: Very similar or closely similar in terms of semantics.
+• 1-2: Slightly similar or somewhat similar.
+• 0: No relation (there is no word in the other sentence that is even slightly similar in terms of semantics).
+• -1: Punctuation
+## Other guidelines
+• Make sure to output the correct JSON format and to preserve the provided sentence tokenization.
+Output only the raw JSON, without any additional text.
+## Input to Annotate
+Sentence 1: {{ sentence1 }}
+Sentence 2: {{ sentence2 }}
+Respond with the JSON object.
