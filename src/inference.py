@@ -1,5 +1,5 @@
 """OpenAI-compatible Apertus inference; intentionally no dependency on OpenAI SDK."""
-import json, time
+import json, time, os
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError,URLError
 
@@ -7,11 +7,11 @@ class InferenceError(RuntimeError): pass
 
 def chat_completion(base_url, model, prompt,api_key='',timeout=52,max_tokens=4096,retries=1):
     if not base_url:raise InferenceError('LLM_BASE_URL required')
-    if 'Apertus' not in model:raise InferenceError('Refusing non-Apertus primary model')
+    if 'apertus' not in model.lower():raise InferenceError('Refusing non-Apertus primary model')
     url=base_url.rstrip('/')+'/chat/completions'
     payload={'model':model,'messages':[{'role':'user','content':prompt}],
              'temperature':0,'max_tokens':max_tokens,'stream':False}
-    headers={'Content-Type':'application/json'}
+    headers={'Content-Type':'application/json', 'User-Agent':os.environ.get('LLM_USER_AGENT','CLAUSESHIFT/1.0')}
     if api_key:headers['Authorization']='Bearer '+api_key
     request=Request(url,json.dumps(payload).encode('utf-8'),headers,method='POST')
     for attempt in range(retries+1):

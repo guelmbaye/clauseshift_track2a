@@ -89,7 +89,7 @@ def read_checkpoint(path,signature):
 def do_run(args):
     if args.split=='final' and (not args.confirm_final or not args.frozen_commit or len(args.frozen_commit)<7):
         raise ValueError('FINAL RUN blocked: --confirm-final and --frozen-commit required')
-    if args.split=='final' and args.max_examples:
+    if args.split=='final' and (args.max_examples or args.smoke_shortest):
         raise ValueError('No partial final run is allowed')
     model=os.environ.get('LLM_NAME','swiss-ai/Apertus-v1.5-8B')
     base_url=os.environ.get('LLM_BASE_URL','');key=os.environ.get('LLM_API_KEY','')
@@ -110,8 +110,11 @@ def do_run(args):
         allowed_ids={r['id'] for r in rows}
         if not set(past).issubset(allowed_ids):raise ValueError('Checkpoint includes unknown ID')
         completed=0
+        # DEV-only smoke: choose the shortest document-pair to validate the provider cheaply.
+        # The selected example remains in its original reference position for checkpointing.
+        selected_rows = [min(rows, key=lambda r:len(r['text_a'].split())+len(r['text_b'].split()))] if args.smoke_shortest else rows
         with cp.open('a',encoding='utf-8') as handle:
-            for row in rows:
+            for row in selected_rows:
                 if row['id'] in past:continue
                 if args.max_examples and completed>=args.max_examples:break
                 text=chat_completion(base_url,model,encode_prompt(row['text_a'],row['text_b'],prompt),key,
@@ -173,6 +176,7 @@ def main(argv=None):
     run.add_argument('--prompt-file',type=Path,help='Optional exact appendix-E prompt template; placeholders required')
     run.add_argument('--checkpoint-dir',type=Path,default=BASE/'out'/'checkpoints')
     run.add_argument('--max-examples',type=int,default=0)
+    run.add_argument('--smoke-shortest',action='store_true',help='DEV only: infer shortest document pair per language, save checkpoint')
     run.add_argument('--max-tokens',type=int,default=4096)
     run.add_argument('--timeout',type=float,default=52)
     run.add_argument('--retries',type=int,default=1)
