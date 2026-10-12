@@ -100,6 +100,10 @@ def do_run(args):
         prompt=PAPER_STYLE
         prompt_label='paper-style, NOT verbatim Appendix E'
     signature=digest_settings(model,prompt,args.split,args.max_tokens,base_url,args.frozen_commit)
+    # The optional punctuation postprocessing is a distinct experiment.
+    # Never mix strict E0 checkpoints with E0-punct-repair checkpoints.
+    if args.punctuation_repair:
+        signature=hashlib.sha256((signature+'|punctuation-repair-v1').encode()).hexdigest()
     print(f'Method: {prompt_label}; model: {model}; split: {args.split}; signature: {signature[:12]}')
     for lang in LANGS:
         inputpath=path_in(args.input_dir,args.split,lang)
@@ -119,9 +123,18 @@ def do_run(args):
                 if args.max_examples and completed>=args.max_examples:break
                 text=chat_completion(base_url,model,encode_prompt(row['text_a'],row['text_b'],prompt),key,
                     timeout=args.timeout,max_tokens=args.max_tokens,retries=args.retries)
-                pred=normalize_prediction(row,text)
+                repair_log=[]
+                pred=normalize_prediction(row,text,
+                    punctuation_repair=args.punctuation_repair,repair_log=repair_log)
                 valid_prediction(pred,row)
-                cp_row={'_signature':signature,**pred}
+                cp_row={'_signature':signature, **pred}
+                if args.punctuation_repair:
+                    cp_row['_postprocessing']='punctuation-repair-v1'
+                    cp_row['_repair_log']=repair_log
+                    cp_row['_raw_response_sha256']=hashlib.sha256(text.encode('utf-8')).hexdigest()
+                    if any(item['changed'] for item in repair_log):
+                        print(f'[PUNCTUATION REPAIR] {row["id"]}: '
+                              f'{[item["side"] for item in repair_log if item["changed"]]}',flush=True)
                 handle.write(json.dumps(cp_row,ensure_ascii=False)+'\n');handle.flush()
                 past[row['id']]=cp_row;completed+=1
                 print(f'[RUN {args.split}] {lang} {completed} new / {len(rows)} total | {row["id"]}',flush=True)
@@ -177,6 +190,7 @@ def main(argv=None):
     run.add_argument('--checkpoint-dir',type=Path,default=BASE/'out'/'checkpoints')
     run.add_argument('--max-examples',type=int,default=0)
     run.add_argument('--smoke-shortest',action='store_true',help='DEV only: infer shortest document pair per language, save checkpoint')
+    run.add_argument('--punctuation-repair',action='store_true',help='EXPERIMENTAL: preserve all non-punctuation tokens/scores; restore standalone punctuation as -1')
     run.add_argument('--max-tokens',type=int,default=4096)
     run.add_argument('--timeout',type=float,default=52)
     run.add_argument('--retries',type=int,default=1)

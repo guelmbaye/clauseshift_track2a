@@ -1,6 +1,7 @@
 """Input contracts, baseline prompting and safe label projection for SwissGov-RSD."""
 import json
 import math
+import unicodedata
 from pathlib import Path
 
 LANGS = ("de", "fr", "it")
@@ -61,8 +62,67 @@ def encode_prompt(text_a,text_b,template=PAPER_STYLE):
         raise ValueError('Template must contain {{ sentence1 }} and {{ sentence2 }}')
     return template.replace('{{ sentence1 }}',json.dumps(text_a.split(),ensure_ascii=False)).replace('{{ sentence2 }}',json.dumps(text_b.split(),ensure_ascii=False))
 
-def normalize_prediction(input_row,response):
+def is_punctuation_only(token):
+    """Conservatively recognize stand-alone Unicode punctuation, not mixed words.
+
+    Example: "," is punctuation, but "l'administration" and "3,5" are not.
+    Unknown symbols are *not* silently classified as punctuation.
+    """
+    return bool(token) and all(unicodedata.category(char).startswith('P') for char in token)
+
+
+def restore_punctuation_only(expected, generated, side):
+    """Restore input punctuation positions without inventing semantic labels.
+
+    The generated sequence must contain the exact same NON-punctuation tokens in
+    the exact same order. All model-produced semantic scores are preserved.
+    Stand-alone punctuation in the input receives -1; generated punctuation
+    is discarded. Refuse malformed/changed/omitted/reordered semantic tokens.
+    """
+    if not isinstance(generated, list):
+        raise PredictionError(f'{side}: expected list of [token, score]')
+    for i, entry in enumerate(generated):
+        if not isinstance(entry, list) or len(entry) != 2 or not isinstance(entry[0], str):
+            raise PredictionError(f'{side}[{i}]: malformed [token, score]')
+        v = entry[1]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < -1 or v > 5:
+            raise PredictionError(f'{side}[{i}]: invalid score {v!r}')
+
+    exp_semantic = [t for t in expected if not is_punctuation_only(t)]
+    gen_semantic = [e for e in generated if not is_punctuation_only(e[0])]
+    generated_tokens = [e[0] for e in gen_semantic]
+    if generated_tokens != exp_semantic:
+        for i, (want, got) in enumerate(zip(exp_semantic, generated_tokens)):
+            if want != got:
+                raise PredictionError(
+                    f'{side}: semantic token drift at non-punctuation position {i}: '
+                    f'expected {want!r}, got {got!r}. Refusing repair.')
+        raise PredictionError(
+            f'{side}: semantic token count changed: expected {len(exp_semantic)}, '
+            f'got {len(generated_tokens)}. Refusing repair.')
+    if any(e[1] == -1 for e in gen_semantic):
+        raise PredictionError(f'{side}: semantic token was given punctuation score -1; refusing repair')
+
+    it = iter(gen_semantic)
+    restored = [[token, -1] if is_punctuation_only(token) else next(it)
+                for token in expected]
+    changed = restored != generated
+    return restored, {
+        'side': side,
+        'changed': changed,
+        'source_punctuation': sum(is_punctuation_only(t) for t in expected),
+        'generated_punctuation': len(generated) - len(gen_semantic),
+        'semantic_tokens_preserved': len(exp_semantic),
+    }
+
+
+def normalize_prediction(input_row, response, punctuation_repair=False, repair_log=None):
     data=parse_json_object(response)
+    if punctuation_repair:
+        for key, text in (('sentence1', input_row['text_a']), ('sentence2', input_row['text_b'])):
+            fixed, info = restore_punctuation_only(text.split(), data.get(key), key)
+            data[key] = fixed
+            if repair_log is not None: repair_log.append(info)
     return {'id':input_row['id'],'text_a':input_row['text_a'],'text_b':input_row['text_b'],
             'labels_a':project_token_labels(data,input_row['text_a'].split(),'sentence1'),
             'labels_b':project_token_labels(data,input_row['text_b'].split(),'sentence2')}
