@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+.env.*
+!.env.example
+/data/inputs/*
+!/data/inputs/.gitkeep
+/out/*
+!/out/.gitkeep
+/.hf_cache/
+*.log
