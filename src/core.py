@@ -71,13 +71,16 @@ def is_punctuation_only(token):
     return bool(token) and all(unicodedata.category(char).startswith('P') for char in token)
 
 
-def restore_punctuation_only(expected, generated, side):
+def restore_punctuation_only(expected, generated, side, boundary_quote_repair=False):
     """Restore input punctuation positions without inventing semantic labels.
 
     The generated sequence must contain the exact same NON-punctuation tokens in
     the exact same order. All model-produced semantic scores are preserved.
     Stand-alone punctuation in the input receives -1; generated punctuation
     is discarded. Refuse malformed/changed/omitted/reordered semantic tokens.
+    Optional extra mode accepts ONLY one missing Unicode double quotation
+    mark at the beginning/end of a token, preserving its generated score.
+    Never strip inner apostrophes, dashes, digits, or ordinary punctuation.
     """
     if not isinstance(generated, list):
         raise PredictionError(f'{side}: expected list of [token, score]')
@@ -91,6 +94,24 @@ def restore_punctuation_only(expected, generated, side):
     exp_semantic = [t for t in expected if not is_punctuation_only(t)]
     gen_semantic = [e for e in generated if not is_punctuation_only(e[0])]
     generated_tokens = [e[0] for e in gen_semantic]
+    quote_repairs = []
+    if boundary_quote_repair and len(exp_semantic) == len(generated_tokens):
+        # One single missing quotation mark only; never touch internal punctuation,
+        # possessives, contractions, hyphens or numeric separators.
+        quote_chars = frozenset('«»“”„‟')
+        remapped = []
+        for i, (want, got) in enumerate(zip(exp_semantic, generated_tokens)):
+            if want == got:
+                remapped.append(want)
+            elif (len(want) > len(got) and len(want) == len(got) + 1 and
+                  ((want[0] in quote_chars and want[1:] == got) or
+                   (want[-1] in quote_chars and want[:-1] == got))):
+                remapped.append(want)
+                quote_repairs.append({'semantic_index': i, 'expected': want,
+                                      'generated': got})
+            else:
+                remapped.append(got)
+        generated_tokens = remapped
     if generated_tokens != exp_semantic:
         for i, (want, got) in enumerate(zip(exp_semantic, generated_tokens)):
             if want != got:
@@ -104,8 +125,14 @@ def restore_punctuation_only(expected, generated, side):
         raise PredictionError(f'{side}: semantic token was given punctuation score -1; refusing repair')
 
     it = iter(gen_semantic)
-    restored = [[token, -1] if is_punctuation_only(token) else next(it)
-                for token in expected]
+    restored = []
+    for token in expected:
+        if is_punctuation_only(token):
+            restored.append([token, -1])
+        else:
+            entry = next(it)
+            # Rewrite only the exact original token identity, NEVER its model score.
+            restored.append([token, entry[1]])
     changed = restored != generated
     return restored, {
         'side': side,
@@ -113,6 +140,7 @@ def restore_punctuation_only(expected, generated, side):
         'source_punctuation': sum(is_punctuation_only(t) for t in expected),
         'generated_punctuation': len(generated) - len(gen_semantic),
         'semantic_tokens_preserved': len(exp_semantic),
+        'boundary_quote_repairs': quote_repairs,
     }
 
 
@@ -173,7 +201,7 @@ def remove_one_extraneous_rparen(text):
 
 
 def normalize_prediction(input_row, response, punctuation_repair=False, repair_log=None,
-                         syntax_repair=False, syntax_log=None):
+                         syntax_repair=False, syntax_log=None, boundary_quote_repair=False):
     if syntax_repair:
         response, info = remove_one_extraneous_rparen(response)
         if syntax_log is not None:
@@ -181,7 +209,8 @@ def normalize_prediction(input_row, response, punctuation_repair=False, repair_l
     data=parse_json_object(response)
     if punctuation_repair:
         for key, text in (('sentence1', input_row['text_a']), ('sentence2', input_row['text_b'])):
-            fixed, info = restore_punctuation_only(text.split(), data.get(key), key)
+            fixed, info = restore_punctuation_only(text.split(), data.get(key), key,
+                                                    boundary_quote_repair=boundary_quote_repair)
             data[key] = fixed
             if repair_log is not None: repair_log.append(info)
     return {'id':input_row['id'],'text_a':input_row['text_a'],'text_b':input_row['text_b'],
