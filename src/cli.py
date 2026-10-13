@@ -1,7 +1,8 @@
 """Split-safe CLI. Only dev is available without explicit final freeze confirmation."""
-import argparse, hashlib, json, os, subprocess, sys
+import argparse, hashlib, json, os, subprocess, sys, time
 from urllib.request import urlopen
 from pathlib import Path
+from urllib.parse import urlsplit
 from .core import (LANGS,PAPER_STYLE,encode_prompt,normalize_prediction,valid_prediction,
                    validate_input_rows,load_jsonl,write_jsonl,PredictionError)
 from .inference import chat_completion,InferenceError
@@ -89,8 +90,11 @@ def read_checkpoint(path,signature):
 def do_run(args):
     if args.split=='final' and (not args.confirm_final or not args.frozen_commit or len(args.frozen_commit)<7):
         raise ValueError('FINAL RUN blocked: --confirm-final and --frozen-commit required')
-    if args.split=='final' and (args.max_examples or args.smoke_shortest):
-        raise ValueError('No partial final run is allowed')
+    if args.split=='final' and (args.max_examples or args.smoke_shortest or args.dev_shortest_first
+                                or args.lang!='all'):
+        raise ValueError('No partial or reordered final run is allowed')
+    if args.smoke_shortest and args.dev_shortest_first:
+        raise ValueError('Choose either --smoke-shortest or --dev-shortest-first')
     model=os.environ.get('LLM_NAME','swiss-ai/Apertus-v1.5-8B')
     base_url=os.environ.get('LLM_BASE_URL','');key=os.environ.get('LLM_API_KEY','')
     if args.prompt_file:
@@ -105,7 +109,8 @@ def do_run(args):
     if args.punctuation_repair:
         signature=hashlib.sha256((signature+'|punctuation-repair-v1').encode()).hexdigest()
     print(f'Method: {prompt_label}; model: {model}; split: {args.split}; signature: {signature[:12]}')
-    for lang in LANGS:
+    run_langs=LANGS if args.lang=='all' else (args.lang,)
+    for lang in run_langs:
         inputpath=path_in(args.input_dir,args.split,lang)
         rows=list(load_jsonl(inputpath));validate_input_rows(rows)
         cp=Path(args.checkpoint_dir)/f'{args.split}_{lang}.checkpoint.jsonl'
@@ -116,13 +121,31 @@ def do_run(args):
         completed=0
         # DEV-only smoke: choose the shortest document-pair to validate the provider cheaply.
         # The selected example remains in its original reference position for checkpointing.
-        selected_rows = [min(rows, key=lambda r:len(r['text_a'].split())+len(r['text_b'].split()))] if args.smoke_shortest else rows
+        if args.smoke_shortest:
+            selected_rows=[min(rows, key=lambda r:len(r['text_a'].split())+len(r['text_b'].split()))]
+        elif args.dev_shortest_first:
+            # Development inference order only. Final export still uses original reference order.
+            selected_rows=sorted(rows, key=lambda r:(len(r['text_a'].split())+len(r['text_b'].split()), r['id']))
+        else:
+            selected_rows=rows
         with cp.open('a',encoding='utf-8') as handle:
             for row in selected_rows:
                 if row['id'] in past:continue
                 if args.max_examples and completed>=args.max_examples:break
-                text=chat_completion(base_url,model,encode_prompt(row['text_a'],row['text_b'],prompt),key,
-                    timeout=args.timeout,max_tokens=args.max_tokens,retries=args.retries)
+                n_a=len(row['text_a'].split());n_b=len(row['text_b'].split())
+                host=urlsplit(base_url).hostname or '<unknown>'
+                print(f'[INFER START] lang={lang} id={row["id"]} '
+                      f'tokens_a={n_a} tokens_b={n_b} total={n_a+n_b} '
+                      f'provider={host} max_output_tokens={args.max_tokens}',flush=True)
+                started=time.monotonic()
+                try:
+                    text=chat_completion(base_url,model,encode_prompt(row['text_a'],row['text_b'],prompt),key,
+                        timeout=args.timeout,max_tokens=args.max_tokens,retries=args.retries)
+                except InferenceError as exc:
+                    print(f'[INFER FAILED] {lang}/{row["id"]} after {time.monotonic()-started:.1f}s: {exc}',flush=True)
+                    raise
+                print(f'[INFER OK] {lang}/{row["id"]} elapsed={time.monotonic()-started:.1f}s '
+                      f'output_chars={len(text)}',flush=True)
                 repair_log=[]
                 pred=normalize_prediction(row,text,
                     punctuation_repair=args.punctuation_repair,repair_log=repair_log)
@@ -190,6 +213,8 @@ def main(argv=None):
     run.add_argument('--checkpoint-dir',type=Path,default=BASE/'out'/'checkpoints')
     run.add_argument('--max-examples',type=int,default=0)
     run.add_argument('--smoke-shortest',action='store_true',help='DEV only: infer shortest document pair per language, save checkpoint')
+    run.add_argument('--dev-shortest-first',action='store_true',help='DEV only: process shortest remaining pairs first; does not change final reference order')
+    run.add_argument('--lang',choices=['all','de','fr','it'],default='all',help='DEV only: select one language while diagnosing provider limits')
     run.add_argument('--punctuation-repair',action='store_true',help='EXPERIMENTAL: preserve all non-punctuation tokens/scores; restore standalone punctuation as -1')
     run.add_argument('--max-tokens',type=int,default=4096)
     run.add_argument('--timeout',type=float,default=52)

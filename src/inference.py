@@ -2,6 +2,7 @@
 import json, time, os
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError,URLError
+from urllib.parse import urlsplit
 
 class InferenceError(RuntimeError): pass
 
@@ -21,7 +22,13 @@ def chat_completion(base_url, model, prompt,api_key='',timeout=52,max_tokens=409
             if not isinstance(content,str):raise InferenceError('Unexpected response content')
             return content
         except HTTPError as e:
-            if e.code==504:raise InferenceError('CSCS 504/60s: persistent timeout. Do not blindly retry; change strategy or serving.') from e
+            if e.code==504:
+                host=urlsplit(base_url).hostname or '<unknown>'
+                raise InferenceError(
+                    f'HTTP 504 from {host}: provider/gateway timed out. '
+                    'Increasing client --timeout or repeating an identical long request '
+                    'is unlikely to help.'
+                ) from e
             if e.code in (408,429,500,502,503) and attempt<retries:
                 time.sleep(min(4,2**attempt));continue
             raise InferenceError(f'HTTP {e.code}: inference failed') from e
