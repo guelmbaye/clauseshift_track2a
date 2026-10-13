@@ -118,6 +118,8 @@ def do_run(args):
     if args.split=='final' and (args.max_examples or args.smoke_shortest or args.dev_shortest_first
                                 or args.lang!='all'):
         raise ValueError('No partial or reordered final run is allowed')
+    if args.syntax_repair and not args.punctuation_repair:
+        raise ValueError('--syntax-repair requires --punctuation-repair to keep strict token checks')
     if args.smoke_shortest and args.dev_shortest_first:
         raise ValueError('Choose either --smoke-shortest or --dev-shortest-first')
     model=os.environ.get('LLM_NAME','swiss-ai/Apertus-v1.5-8B')
@@ -133,6 +135,8 @@ def do_run(args):
     # Never mix strict E0 checkpoints with E0-punct-repair checkpoints.
     if args.punctuation_repair:
         signature=hashlib.sha256((signature+'|punctuation-repair-v1').encode()).hexdigest()
+    if args.syntax_repair:
+        signature=hashlib.sha256((signature+'|syntax-repair-v1').encode()).hexdigest()
     print(f'Method: {prompt_label}; model: {model}; split: {args.split}; signature: {signature[:12]}')
     run_langs=LANGS if args.lang=='all' else (args.lang,)
     for lang in run_langs:
@@ -172,9 +176,11 @@ def do_run(args):
                 print(f'[INFER OK] {lang}/{row["id"]} elapsed={time.monotonic()-started:.1f}s '
                       f'output_chars={len(text)}',flush=True)
                 repair_log=[]
+                syntax_log=[]
                 try:
                     pred=normalize_prediction(row,text,
-                        punctuation_repair=args.punctuation_repair,repair_log=repair_log)
+                        punctuation_repair=args.punctuation_repair,repair_log=repair_log,
+                        syntax_repair=args.syntax_repair,syntax_log=syntax_log)
                     valid_prediction(pred,row)
                 except (PredictionError,ValueError) as exc:
                     # The response previously vanished on failed parse. Save DEV only;
@@ -184,8 +190,12 @@ def do_run(args):
                             root=BASE/'out'/'diagnostics')
                     raise
                 cp_row={'_signature':signature, **pred}
+                if args.syntax_repair:
+                    cp_row['_syntax_repair_log']=syntax_log
+                    if any(item['changed'] for item in syntax_log):
+                        print(f'[SYNTAX REPAIR] {row["id"]}: {syntax_log}',flush=True)
                 if args.punctuation_repair:
-                    cp_row['_postprocessing']='punctuation-repair-v1'
+                    cp_row['_postprocessing']='punctuation-repair-v1'+('+syntax-repair-v1' if args.syntax_repair else '')
                     cp_row['_repair_log']=repair_log
                     cp_row['_raw_response_sha256']=hashlib.sha256(text.encode('utf-8')).hexdigest()
                     if any(item['changed'] for item in repair_log):
@@ -249,6 +259,7 @@ def main(argv=None):
     run.add_argument('--dev-shortest-first',action='store_true',help='DEV only: process shortest remaining pairs first; does not change final reference order')
     run.add_argument('--lang',choices=['all','de','fr','it'],default='all',help='DEV only: select one language while diagnosing provider limits')
     run.add_argument('--punctuation-repair',action='store_true',help='EXPERIMENTAL: preserve all non-punctuation tokens/scores; restore standalone punctuation as -1')
+    run.add_argument('--syntax-repair',action='store_true',help='EXPERIMENTAL: remove one demonstrably superfluous ")" in JSON, then run strict token validation; new checkpoint required')
     run.add_argument('--max-tokens',type=int,default=4096)
     run.add_argument('--timeout',type=float,default=52)
     run.add_argument('--retries',type=int,default=1)

@@ -116,7 +116,68 @@ def restore_punctuation_only(expected, generated, side):
     }
 
 
-def normalize_prediction(input_row, response, punctuation_repair=False, repair_log=None):
+def remove_one_extraneous_rparen(text):
+    """One conservative syntax fix: drop a stray ')' in `]), [` outside strings.
+
+    Refuse any other syntax error, multiple candidates, non-JSON output,
+    or modification inside quoted tokens. Semantic validation is separate.
+    """
+    try:
+        parse_json_object(text)
+        return text, {'changed': False, 'kind': 'none'}
+    except PredictionError as exc:
+        decode_error = exc.__cause__
+        if not isinstance(decode_error, json.JSONDecodeError):
+            raise
+
+    # Character-by-character tracking: do not match punctuation inside JSON strings.
+    inside = False
+    escaped = False
+    candidates = []
+    for i, char in enumerate(text):
+        if inside:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                inside = False
+            continue
+        if char == '"':
+            inside = True
+            continue
+        if char != ')' or i == 0 or text[i - 1] != ']':
+            continue
+        # The observed error was: ["sector", 5]), [")", -1]
+        # Removing ONLY ')' gives: ["sector", 5], [")", -1]
+        j = i + 1
+        if j >= len(text) or text[j] != ',':
+            continue
+        j += 1
+        while j < len(text) and text[j].isspace():
+            j += 1
+        if j < len(text) and text[j] == '[':
+            candidates.append(i)
+
+    if len(candidates) != 1:
+        raise PredictionError(
+            f'Syntax repair refused: expected one stray bracket-adjacent ")"; found {len(candidates)}') from decode_error
+    pos = candidates[0]
+    if abs(pos - decode_error.pos) > 2:
+        raise PredictionError('Syntax repair refused: candidate is not at parser failure') from decode_error
+    amended = text[:pos] + text[pos + 1:]
+    # Validity is checked across the ENTIRE object, not only near the error.
+    parse_json_object(amended)
+    return amended, {'changed': True, 'kind': 'removed-stray-rparen',
+                     'raw_character_offset': pos}
+
+
+def normalize_prediction(input_row, response, punctuation_repair=False, repair_log=None,
+                         syntax_repair=False, syntax_log=None):
+    if syntax_repair:
+        response, info = remove_one_extraneous_rparen(response)
+        if syntax_log is not None:
+            syntax_log.append(info)
     data=parse_json_object(response)
     if punctuation_repair:
         for key, text in (('sentence1', input_row['text_a']), ('sentence2', input_row['text_b'])):
