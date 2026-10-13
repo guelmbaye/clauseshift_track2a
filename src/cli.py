@@ -116,8 +116,11 @@ def do_run(args):
     if args.split=='final' and (not args.confirm_final or not args.frozen_commit or len(args.frozen_commit)<7):
         raise ValueError('FINAL RUN blocked: --confirm-final and --frozen-commit required')
     if args.split=='final' and (args.max_examples or args.smoke_shortest or args.dev_shortest_first
-                                or args.lang!='all'):
+                                or args.lang!='all' or getattr(args,'doc_id',None)):
         raise ValueError('No partial or reordered final run is allowed')
+    if getattr(args,'doc_id',None):
+        if args.split!='dev' or args.lang=='all' or args.smoke_shortest or args.dev_shortest_first:
+            raise ValueError('--doc-id is DEV-only, requires --lang de/fr/it, and cannot combine with selection/reordering')
     if args.boundary_quote_repair and not (args.punctuation_repair and args.syntax_repair):
         raise ValueError('--boundary-quote-repair requires --punctuation-repair and --syntax-repair')
     if args.syntax_repair and not args.punctuation_repair:
@@ -154,7 +157,11 @@ def do_run(args):
         completed=0
         # DEV-only smoke: choose the shortest document-pair to validate the provider cheaply.
         # The selected example remains in its original reference position for checkpointing.
-        if args.smoke_shortest:
+        if getattr(args,'doc_id',None):
+            selected_rows=[r for r in rows if r['id']==args.doc_id]
+            if len(selected_rows)!=1:
+                raise ValueError(f'Exactly one DEV document required for --doc-id {args.doc_id!r}; found {len(selected_rows)}')
+        elif args.smoke_shortest:
             selected_rows=[min(rows, key=lambda r:len(r['text_a'].split())+len(r['text_b'].split()))]
         elif args.dev_shortest_first:
             # Development inference order only. Final export still uses original reference order.
@@ -263,6 +270,7 @@ def main(argv=None):
     run.add_argument('--smoke-shortest',action='store_true',help='DEV only: infer shortest document pair per language, save checkpoint')
     run.add_argument('--dev-shortest-first',action='store_true',help='DEV only: process shortest remaining pairs first; does not change final reference order')
     run.add_argument('--lang',choices=['all','de','fr','it'],default='all',help='DEV only: select one language while diagnosing provider limits')
+    run.add_argument('--doc-id',help='DEV ONLY: score exactly one document by ID without reordering reference output')
     run.add_argument('--punctuation-repair',action='store_true',help='EXPERIMENTAL: preserve all non-punctuation tokens/scores; restore standalone punctuation as -1')
     run.add_argument('--syntax-repair',action='store_true',help='EXPERIMENTAL: remove one demonstrably superfluous ")" in JSON, then run strict token validation; new checkpoint required')
     run.add_argument('--boundary-quote-repair',action='store_true',help='EXPERIMENTAL: restore only a single missing Unicode double quotation mark at token boundary; separate E0-PJQ checkpoint')
