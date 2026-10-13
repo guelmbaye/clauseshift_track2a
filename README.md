@@ -2,7 +2,7 @@
 
 *Evidence-Grounded Cross-Lingual Semantic Difference Recognition with Apertus 1.5*
 
-> **Status: implemented benchmark/baseline scaffold, not a completed or scored submission.**
+> **Status: real Apertus experiments on selected DEV documents; no official full DEV score, held-out test evaluation, or completed final submission.**
 
 Commencer en français par [`docs/GUIDE_EXECUTION_FR.md`](docs/GUIDE_EXECUTION_FR.md). For detailed English instructions see [`docs/EXECUTION_GUIDE.md`](docs/EXECUTION_GUIDE.md) for all steps (dev inputs, exact prompting, Apertus API, prediction format, validation, official evaluation, final freeze and test isolation). The frozen strategy is [`docs/DOCUMENT_01_FROZEN_V1.2.md`](docs/DOCUMENT_01_FROZEN_V1.2.md).
 
@@ -23,7 +23,7 @@ Before claiming exact baseline reproduction, supply verbatim Appendix-E prompt i
 
 `macro_spearman = (rho_en_de + rho_en_fr + rho_en_it) / 3`
 
-**No real Apertus results have been generated in this starter.**
+**Limited real Apertus DEV proxy results exist; see `technical_report.md`. No official full-benchmark score is established.**
 
 ## Official rules and research
 
@@ -56,3 +56,7 @@ est un outil auxiliaire et doit être déclaré dans le rapport de concours.
 
 **Attention :** aucune performance E2 sur données réelles n'a encore été mesurée ;
 la V1.9 ne modifie pas le `make run` final.
+
+## Frozen submission runner V1.11 (provisional E0-PJQ)
+
+`make run` now runs Docker on the deliberately frozen E0-PJQ baseline, **only after** a verified `docs/submission_frozen.json` has been committed. See `docs/SUBMISSION_RUNNER_V111_FR.md`. Full-set completion is **not verified**: long inputs may still cause HTTP 504. The code deliberately rejects partial outputs.

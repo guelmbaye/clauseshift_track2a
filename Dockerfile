@@ -3,6 +3,7 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY src/ /app/src/
 COPY prompts/ /app/prompts/
-COPY data/ /app/data/
-COPY out/ /app/out/
-CMD ["python","-m","src.cli","run","--split","dev"]
+COPY docs/ /app/docs/
+COPY Makefile Dockerfile /app/
+RUN mkdir -p /app/data/inputs /app/out/predictions /app/out/checkpoints
+CMD ["python", "-m", "src.submission", "run"]
