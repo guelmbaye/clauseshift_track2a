@@ -1,5 +1,6 @@
 """Split-safe CLI. Only dev is available without explicit final freeze confirmation."""
-import argparse, hashlib, json, os, subprocess, sys, time
+import argparse, hashlib, json, os, re, subprocess, sys, time
+from datetime import datetime, timezone
 from urllib.request import urlopen
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -87,6 +88,30 @@ def read_checkpoint(path,signature):
         rows[r['id']]=r
     return rows
 
+def preserve_invalid_dev_response(lang, row_id, text, error, root=BASE/'out'/'diagnostics'):
+    """Persist a failed, completed DEV generation. Never inspect or persist TEST here.
+
+    Pure diagnostic: does not change scoring, the method signature, or checkpoints.
+    """
+    if not re.fullmatch(r'(de|fr|it)', lang):
+        raise ValueError('Refusing unknown language for diagnostic')
+    directory=Path(root)
+    directory.mkdir(parents=True,exist_ok=True,mode=0o700)
+    os.chmod(directory,0o700)
+    clean_id=re.sub(r'[^A-Za-z0-9_-]+','_',row_id)[:80]
+    sha=hashlib.sha256(text.encode('utf-8')).hexdigest()
+    stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    filename=directory/f'dev_{lang}_{clean_id}_{stamp}_{sha[:10]}_raw.txt'
+    fd=os.open(filename,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+    with os.fdopen(fd,'w',encoding='utf-8') as f: f.write(text)
+    print(f'[RAW INVALID SAVED] dev/{lang}/{row_id} -> {filename} sha256={sha}', flush=True)
+    cause=error.__cause__
+    if isinstance(cause,json.JSONDecodeError):
+        start=max(0,cause.pos-85); end=min(len(text),cause.pos+85)
+        print(f'[JSON SYNTAX] line={cause.lineno} column={cause.colno} char={cause.pos}; '
+              f'context={text[start:end]!r}',flush=True)
+    return filename
+
 def do_run(args):
     if args.split=='final' and (not args.confirm_final or not args.frozen_commit or len(args.frozen_commit)<7):
         raise ValueError('FINAL RUN blocked: --confirm-final and --frozen-commit required')
@@ -147,9 +172,17 @@ def do_run(args):
                 print(f'[INFER OK] {lang}/{row["id"]} elapsed={time.monotonic()-started:.1f}s '
                       f'output_chars={len(text)}',flush=True)
                 repair_log=[]
-                pred=normalize_prediction(row,text,
-                    punctuation_repair=args.punctuation_repair,repair_log=repair_log)
-                valid_prediction(pred,row)
+                try:
+                    pred=normalize_prediction(row,text,
+                        punctuation_repair=args.punctuation_repair,repair_log=repair_log)
+                    valid_prediction(pred,row)
+                except (PredictionError,ValueError) as exc:
+                    # The response previously vanished on failed parse. Save DEV only;
+                    # preserve fail-closed and never write an invalid checkpoint.
+                    if args.split=='dev':
+                        preserve_invalid_dev_response(lang,row['id'],text,exc,
+                            root=BASE/'out'/'diagnostics')
+                    raise
                 cp_row={'_signature':signature, **pred}
                 if args.punctuation_repair:
                     cp_row['_postprocessing']='punctuation-repair-v1'
