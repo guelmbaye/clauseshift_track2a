@@ -60,3 +60,13 @@ la V1.9 ne modifie pas le `make run` final.
 ## Frozen submission runner V1.11 (provisional E0-PJQ)
 
 `make run` now runs Docker on the deliberately frozen E0-PJQ baseline, **only after** a verified `docs/submission_frozen.json` has been committed. See `docs/SUBMISSION_RUNNER_V111_FR.md`. Full-set completion is **not verified**: long inputs may still cause HTTP 504. The code deliberately rejects partial outputs.
+
+
+## V1.14 — Batched Indexed Scoring (experimental)
+
+See `docs/BATCH_SUBMISSION_V114_FR.md`. The DEV-only interface is
+`python3 -m src.e2_batch`; its completed scores can be compared to E0 with
+`python3 -m tools.compare_e2_batch_dev`. The official Docker `make run` now
+accepts a frozen manifest selecting either `E0-PJQ` or `E2-BATCH` — only
+after explicit, source-hash-verified freeze. V1.14 has **not** yet been tested
+with a real Apertus batch response or run end-to-end on the full corpus.

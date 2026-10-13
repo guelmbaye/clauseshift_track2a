@@ -9,6 +9,7 @@ import math
 import re
 import unicodedata
 from pathlib import Path
+from functools import lru_cache
 
 from .e1c import chunk_ranges
 
@@ -38,13 +39,18 @@ def token_spans(tokens, max_unit_tokens=20):
     return spans
 
 
-def _embeddings(strings, model_name, revision):
+@lru_cache(maxsize=2)
+def _cached_embedder(model_name, revision):
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as exc:
         raise RuntimeError('Semantic alignment requires: pip install sentence-transformers') from exc
-    # Exact revision recommended for scientific reproducibility.
-    model = SentenceTransformer(model_name, revision=revision, device='cpu')
+    return SentenceTransformer(model_name, revision=revision, device='cpu')
+
+
+def _embeddings(strings, model_name, revision):
+    # Avoid reloading a 470 MB multilingual model for every document.
+    model = _cached_embedder(model_name,revision)
     return model.encode(strings, normalize_embeddings=True, show_progress_bar=False,
                         batch_size=16)
 

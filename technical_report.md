@@ -65,3 +65,19 @@ content receives model-generated scores, never scores fabricated by the planner.
 The indexed few-shot instruction is adapted from Appendix E and is **not**
 claimed to be an exact paper baseline. E2 V1.10 achieved 0.2911/0.1262/-0.0759 Spearman proxy on `admin_*_105` for EN–DE/FR/IT, respectively. No full benchmark or held-out test performance has been measured. The final model selection and
 frozen held-out test execution are pending.
+
+
+## V1.14 multi-unit batching — experimental method and limits
+
+The new candidate groups consecutive, coverage-aware aligned bilingual units
+into calls capped by semantic score count and a unit-count limit. Prompt output
+is indexed per unit; parser rejects missing, duplicate, unexpected and invalid
+indices. Each accepted batch is saved in signed append-only checkpoints.
+Original token ordering is rebuilt before any predictions are exported.
+Concurrent workers are bounded and checkpoint writes serialized. Final inputs
+are prohibited until signed submission preflight.
+
+The batching modifies the model's context and is not equivalent to E0-PJQ or
+the previously evaluated E2 variant. Its Spearman quality is **unmeasured**;
+all tests are synthetic and the end-to-end Docker run has not been tested.
+Existing E0 and E2 comparisons are small, exploratory, and not UZH scores.
