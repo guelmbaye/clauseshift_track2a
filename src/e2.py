@@ -57,9 +57,36 @@ def fingerprint(args,model,url):
           'embedding_model':args.embedding_model,'embedding_revision':args.embedding_revision,
           'max_unit_tokens':args.max_unit_tokens,
           'similarity_threshold':args.similarity_threshold,'merge_penalty':args.merge_penalty}
+    if getattr(args,'max_scores_per_call',0):
+        data['max_scores_per_call']=args.max_scores_per_call
     if args.alignment=='semantic_coverage':
         data.update(coverage_weight=args.coverage_weight,anchor_bonus=args.anchor_bonus)
     return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
+
+
+
+def bounded_request(missing_a, missing_b, limit):
+    """Select an exact, deterministic subset of nonpunctuation indices for one call.
+
+    Does not rescore previously saved indices. A request can be empty on one side,
+    but never on both. Zero means no partitioning (the V1.10 behavior).
+    """
+    a, b = sorted(missing_a), sorted(missing_b)
+    if limit == 0 or len(a)+len(b) <= limit:
+        return set(a), set(b)
+    if limit < 2:
+        raise ValueError('Bounded request size must be at least 2')
+    # Fair allocation when both sides have work; avoid starving one language.
+    target_a = min(len(a), max(1, limit//2)) if a else 0
+    target_b = min(len(b), max(1, limit-target_a)) if b else 0
+    slots=limit-target_a-target_b
+    if slots>0:
+        grow_a=min(slots,len(a)-target_a)
+        target_a+=grow_a
+        slots-=grow_a
+    if slots>0:
+        target_b+=min(slots,len(b)-target_b)
+    return set(a[:target_a]),set(b[:target_b])
 
 
 def read_updates(path,sig,row,plan):
@@ -113,6 +140,8 @@ def completed_document(row,plan,state):
 def run(args,infer=chat_completion,embedder=None):
     if args.context<0 or args.max_calls<0 or args.max_documents<0 or args.max_attempts_per_unit<1:
         raise ValueError('Invalid context, max-calls, max-documents or attempts')
+    if getattr(args,'max_scores_per_call',0) not in (0, *range(2,129)):
+        raise ValueError('max-scores-per-call must be 0 or 2..128')
     if args.prompt not in ('short','fewshot') or args.alignment not in ('semantic','semantic_coverage','proportional'):
         raise ValueError('Unsupported experiment configuration')
     if not 0<=args.similarity_threshold<=1 or not 0<=args.merge_penalty<1:
@@ -173,14 +202,17 @@ def run(args,infer=chat_completion,embedder=None):
                         if args.max_calls and calls>=args.max_calls:
                             print(f'[E2 CALL LIMIT] {calls} paid calls, valid partial scores retained',flush=True)
                             return 0
-                        prompt=scoring_prompt(args,ta,tb,tuple(ra),tuple(rb),missing_a,missing_b)
+                        request_a,request_b=bounded_request(
+                            missing_a,missing_b,getattr(args,'max_scores_per_call',0))
+                        prompt=scoring_prompt(args,ta,tb,tuple(ra),tuple(rb),request_a,request_b)
                         print(f'[E2 START] {lang}/{row["id"]} unit={unit_i+1}/{len(plan["units"])} '
-                              f'kind={unit["kind"]} request_a={len(missing_a)} request_b={len(missing_b)} provider={host}',flush=True)
+                              f'kind={unit["kind"]} request_a={len(request_a)} request_b={len(request_b)} '
+                              f'remaining_before={len(missing_a)+len(missing_b)} provider={host}',flush=True)
                         start=time.monotonic();text=None
                         try:
                             text=infer(endpoint,model,prompt,key,timeout=args.timeout,
                                        max_tokens=args.max_tokens,retries=args.retries)
-                            sa,sb=parse_partial(text,core_a,core_b,missing_a,missing_b)
+                            sa,sb=parse_partial(text,core_a,core_b,request_a,request_b)
                         except (InferenceError,PredictionError,ValueError) as exc:
                             if text is not None:
                                 raw_sha=hashlib.sha256(text.encode()).hexdigest()[:12]
@@ -270,6 +302,8 @@ def main(argv=None):
     p.add_argument('--chunk-tokens',type=int,default=48)
     p.add_argument('--context',type=int,default=20)
     p.add_argument('--max-tokens',type=int,default=512)
+    p.add_argument('--max-scores-per-call',type=int,default=0,
+                   help='DEV-only deterministic bounded requests; 0 preserves V1.10 behavior')
     p.add_argument('--timeout',type=float,default=75)
     p.add_argument('--retries',type=int,default=0)
     p.add_argument('--max-calls',type=int,default=1)
