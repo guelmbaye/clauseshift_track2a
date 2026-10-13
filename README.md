@@ -38,3 +38,9 @@ Code is Apache-2.0. Original scholarly/government documents and their gold annot
 ## E1-C (v1.7) — DEV-only chunked numeric prototype
 
 New **separate candidate method**: `python3 -m src.e1c --lang de --doc-id admin_de_27 --max-calls 1`. See `docs/E1C_EXPERIMENT_V17_FR.md`. The original E0-PJQ method and checkpoints are unchanged. E1-C is not yet part of the final `make run` submission path.
+
+## E1-I V1.8 — DEV-only indexed selective scoring
+
+`python3 -m src.e1i --lang de --doc-id admin_de_27 --chunk-tokens 24 --max-calls 1`
+
+Le modèle retourne des maps indice → score, avec reprise ciblée sur les indices absents. Les scores semantiques sont toujours fournis par Apertus et les ponctuations autonomes reçoivent le score -1 par la règle déterministe du benchmark. Les checkpoints sont indépendants de E0-PJQ et E1-C. Voir `docs/E1I_EXPERIMENT_V18_FR.md`. Pas encore relié à `make run` ; pas de résultat Spearman réel garanti.
