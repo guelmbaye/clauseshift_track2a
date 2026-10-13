@@ -16,7 +16,7 @@ def args(root, **kwargs):
               plan_dir=root/'plans',output_dir=root/'output',diagnostics_dir=root/'diag',
               alignment='proportional',prompt='short',embedding_model='fake-model',
               embedding_revision='test-commit',max_unit_tokens=8,similarity_threshold=0.4,
-              merge_penalty=0.08,chunk_tokens=8,context=4,max_tokens=512,timeout=75,
+              merge_penalty=0.08,coverage_weight=0.5,anchor_bonus=0.35,chunk_tokens=8,context=4,max_tokens=512,timeout=75,
               retries=0,max_calls=1,max_documents=1,max_attempts_per_unit=3,
               shortest_first=False,plan_only=False)
     opts.update(kwargs)

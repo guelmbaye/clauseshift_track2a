@@ -57,6 +57,8 @@ def fingerprint(args,model,url):
           'embedding_model':args.embedding_model,'embedding_revision':args.embedding_revision,
           'max_unit_tokens':args.max_unit_tokens,
           'similarity_threshold':args.similarity_threshold,'merge_penalty':args.merge_penalty}
+    if args.alignment=='semantic_coverage':
+        data.update(coverage_weight=args.coverage_weight,anchor_bonus=args.anchor_bonus)
     return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
 
 
@@ -111,10 +113,12 @@ def completed_document(row,plan,state):
 def run(args,infer=chat_completion,embedder=None):
     if args.context<0 or args.max_calls<0 or args.max_documents<0 or args.max_attempts_per_unit<1:
         raise ValueError('Invalid context, max-calls, max-documents or attempts')
-    if args.prompt not in ('short','fewshot') or args.alignment not in ('semantic','proportional'):
+    if args.prompt not in ('short','fewshot') or args.alignment not in ('semantic','semantic_coverage','proportional'):
         raise ValueError('Unsupported experiment configuration')
     if not 0<=args.similarity_threshold<=1 or not 0<=args.merge_penalty<1:
         raise ValueError('Invalid alignment thresholds')
+    if args.alignment=='semantic_coverage' and not (0 < args.coverage_weight <= 1 and 0 <= args.anchor_bonus <= 1):
+        raise ValueError('Invalid coverage/anchor rewards')
     model=os.environ.get('LLM_NAME','')
     endpoint=os.environ.get('LLM_BASE_URL','')
     key=os.environ.get('LLM_API_KEY','')
@@ -254,13 +258,15 @@ def main(argv=None):
     p.add_argument('--plan-dir',type=Path,default=ROOT/'out'/'plans'/'e2a_dev_v1')
     p.add_argument('--output-dir',type=Path,default=ROOT/'out'/'predictions_e2_dev')
     p.add_argument('--diagnostics-dir',type=Path,default=ROOT/'out'/'diagnostics')
-    p.add_argument('--alignment',choices=['semantic','proportional'],default='semantic')
+    p.add_argument('--alignment',choices=['semantic','semantic_coverage','proportional'],default='semantic')
     p.add_argument('--prompt',choices=['short','fewshot'],default='short')
     p.add_argument('--embedding-model',default='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
     p.add_argument('--embedding-revision',default='main')
     p.add_argument('--max-unit-tokens',type=int,default=20)
     p.add_argument('--similarity-threshold',type=float,default=0.46)
     p.add_argument('--merge-penalty',type=float,default=0.06)
+    p.add_argument('--coverage-weight',type=float,default=0.50)
+    p.add_argument('--anchor-bonus',type=float,default=0.35)
     p.add_argument('--chunk-tokens',type=int,default=48)
     p.add_argument('--context',type=int,default=20)
     p.add_argument('--max-tokens',type=int,default=512)

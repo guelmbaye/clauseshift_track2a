@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from pathlib import Path
 
 from .e1c import chunk_ranges
@@ -56,7 +57,33 @@ def _cos(a,b):
     return sum(float(x)*float(y) for x,y in zip(a,b))
 
 
-def _plan_semantic(a, b, *, max_unit, chunk_tokens, threshold, merge_penalty, embedder):
+def _content_words(tokens):
+    """Case-insensitive lexical anchors, not model-generated scores."""
+    result = []
+    for token in tokens:
+        word = unicodedata.normalize('NFKC', token).casefold().strip('.,;:!?«»"“”()[]')
+        # Exclude digits, short stopword-like spans and punctuation.
+        result.append(word if len(word) >= 4 and any(c.isalpha() for c in word) else None)
+    return result
+
+
+def _shared_anchor_length(left, right):
+    """Longest common contiguous run of >=4-character words, at least 2 words."""
+    a, b = _content_words(left), _content_words(right)
+    best = 0
+    prev = [0] * (len(b) + 1)
+    for wa in a:
+        cur = [0] * (len(b) + 1)
+        if wa is not None:
+            for j, wb in enumerate(b, 1):
+                if wa == wb:
+                    cur[j] = prev[j - 1] + 1
+                    best = max(best, cur[j])
+        prev = cur
+    return best if best >= 2 else 0
+
+
+def _plan_semantic(a, b, *, max_unit, chunk_tokens, threshold, merge_penalty, embedder, coverage_weight=0.0, anchor_bonus=0.0):
     sa=token_spans(a,max_unit)
     sb=token_spans(b,max_unit)
     # Precompute single and merged contiguous text representations.
@@ -91,7 +118,30 @@ def _plan_semantic(a, b, *, max_unit, chunk_tokens, threshold, merge_penalty, em
                     if (j,kj) not in candidates_b:continue
                     sim=_cos(vec['a',i,ki],vec['b',j,kj])
                     if not math.isfinite(sim):raise ValueError('Nonfinite embedding similarity')
-                    gain=sim-threshold-merge_penalty*(ki+kj-2)
+                    if coverage_weight:
+                        # A merged span is credible only when *each* constituent unit
+                        # is semantically related to the other side. This prevents
+                        # absorbing a genuinely missing sentence for extra coverage.
+                        components_a = [vec['a',i+k,1] for k in range(ki)]
+                        components_b = [vec['b',j+k,1] for k in range(kj)]
+                        if (ki+kj>2 and
+                            (any(_cos(v,vec['b',j,kj]) < threshold-0.05 for v in components_a)
+                             or any(_cos(v,vec['a',i,ki]) < threshold-0.05 for v in components_b))):
+                            continue
+                        # Length-weighted reward avoids discarding a translated continuation
+                        # merely because a shorter fragment has a slightly higher cosine.
+                        ra, rb = candidates_a[i,ki], candidates_b[j,kj]
+                        length_a, length_b = ra[1]-ra[0], rb[1]-rb[0]
+                        anchor_len = _shared_anchor_length(a[ra[0]:ra[1]], b[rb[0]:rb[1]])
+                        anchor_reward = anchor_bonus * min(anchor_len, 3) / 3
+                        # Unrelated content must not be forced into a match just to cover tokens.
+                        if sim <= threshold and not anchor_len:
+                            continue
+                        coverage = (length_a + length_b) / (2 * chunk_tokens)
+                        gain = ((sim-threshold+coverage_weight)*coverage
+                                -merge_penalty*(ki+kj-2) + anchor_reward)
+                    else:
+                        gain=sim-threshold-merge_penalty*(ki+kj-2)
                     if gain<=0:continue
                     ni,nj=i+ki,j+kj
                     if score+gain>dp[ni][nj]+1e-10:
@@ -134,20 +184,30 @@ def validate_units(units,na,nb,chunk_tokens):
     return True
 
 
+def alignment_settings(args):
+    spec={key:getattr(args,key) for key in ('alignment','chunk_tokens','max_unit_tokens',
+          'embedding_model','embedding_revision','similarity_threshold','merge_penalty')}
+    # Keep byte-for-byte identical V1.9 plan settings for existing experiments.
+    if args.alignment=='semantic_coverage':
+        spec.update(coverage_weight=args.coverage_weight, anchor_bonus=args.anchor_bonus)
+    return spec
+
+
 def make_plan(row, args, embedder=None):
     a,b=row['text_a'].split(),row['text_b'].split()
     if args.alignment=='proportional':
         units=_plan_proportional(a,b,args.chunk_tokens)
-    elif args.alignment=='semantic':
+    elif args.alignment in ('semantic','semantic_coverage'):
         if embedder is None:
             embedder=lambda texts:_embeddings(texts,args.embedding_model,args.embedding_revision)
         units=_plan_semantic(a,b,max_unit=args.max_unit_tokens,
               chunk_tokens=args.chunk_tokens,threshold=args.similarity_threshold,
-              merge_penalty=args.merge_penalty,embedder=embedder)
+              merge_penalty=args.merge_penalty,embedder=embedder,
+              coverage_weight=(args.coverage_weight if args.alignment=='semantic_coverage' else 0),
+              anchor_bonus=(args.anchor_bonus if args.alignment=='semantic_coverage' else 0))
     else:raise ValueError('Unknown alignment mode')
     validate_units(units,len(a),len(b),args.chunk_tokens)
-    spec={key:getattr(args,key) for key in ('alignment','chunk_tokens','max_unit_tokens',
-          'embedding_model','embedding_revision','similarity_threshold','merge_penalty')}
+    spec=alignment_settings(args)
     result={'version':VERSION,'id':row['id'],
        'input_sha256':hashlib.sha256(json.dumps([a,b],ensure_ascii=False).encode()).hexdigest(),
        'settings':spec,'units':units}
@@ -164,8 +224,7 @@ def save_or_load_plan(path,row,args,embedder=None):
     path=Path(path)
     if path.exists():
         plan=json.loads(path.read_text(encoding='utf-8'))
-        expected_settings={key:getattr(args,key) for key in ('alignment','chunk_tokens','max_unit_tokens',
-              'embedding_model','embedding_revision','similarity_threshold','merge_penalty')}
+        expected_settings=alignment_settings(args)
         a,b=row['text_a'].split(),row['text_b'].split()
         if (plan.get('version')!=VERSION or plan.get('id')!=row['id'] or
             plan.get('settings')!=expected_settings or
