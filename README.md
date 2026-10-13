@@ -44,3 +44,15 @@ New **separate candidate method**: `python3 -m src.e1c --lang de --doc-id admin_
 `python3 -m src.e1i --lang de --doc-id admin_de_27 --chunk-tokens 24 --max-calls 1`
 
 Le modèle retourne des maps indice → score, avec reprise ciblée sur les indices absents. Les scores semantiques sont toujours fournis par Apertus et les ponctuations autonomes reçoivent le score -1 par la règle déterministe du benchmark. Les checkpoints sont indépendants de E0-PJQ et E1-C. Voir `docs/E1I_EXPERIMENT_V18_FR.md`. Pas encore relié à `make run` ; pas de résultat Spearman réel garanti.
+
+## Expérience E2 V1.9 (DEV seulement)
+
+Voir [docs/E2_EXPERIMENT_V19_FR.md](docs/E2_EXPERIMENT_V19_FR.md). Le module `src.e2`
+permet un alignement multilingue par embeddings avec gaps explicites (`semantic`),
+un découpage proportionnel d'ablation (`proportional`), les prompts indexés
+`short` / `fewshot` et des checkpoints distincts. `--plan-only` permet
+l'inspection **sans API Apertus ni labels test**. Le modèle d'embeddings
+est un outil auxiliaire et doit être déclaré dans le rapport de concours.
+
+**Attention :** aucune performance E2 sur données réelles n'a encore été mesurée ;
+la V1.9 ne modifie pas le `make run` final.

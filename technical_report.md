@@ -52,3 +52,16 @@ Technical report CC-BY-4.0. Code Apache-2.0.
 
 ### E1-C experimental candidate — development only
 A separate chunked method with proportional token windows, bilingual context and numeric-only JSON responses is implemented. It must not be conflated with the published prompting baseline. No SwissGov-RSD performance result has yet been observed. A DEV-only exploratory matched-ID Spearman helper is included, and its result is not the official competition metric. Final submission integration and Docker reproduction remain to be implemented after a methodology is selected and frozen.
+
+### Experimental candidate E2 (not yet evaluated)
+
+Separate DEV-only experiments E2-A (semantic-aligned/short indexed), E2-B
+(proportional/few-shot indexed) and E2-C (semantic-aligned/few-shot indexed) were
+implemented as candidate workflows. Semantic alignment relies on an auxiliary
+multilingual embedding model, dynamic-programming monotonic matches with
+explicit unmatched spans, and strict token-preserving reconstruction. Unmatched
+content receives model-generated scores, never scores fabricated by the planner.
+The indexed few-shot instruction is adapted from Appendix E and is **not**
+claimed to be an exact paper baseline. No E2 Spearman result or true Apertus E2
+inference has been measured in this delivery. The final model selection and
+frozen held-out test execution are pending.
