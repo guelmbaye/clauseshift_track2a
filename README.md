@@ -34,3 +34,7 @@ Before claiming exact baseline reproduction, supply verbatim Appendix-E prompt i
 - [Paper and Appendix E](https://aclanthology.org/2026.acl-long.1437.pdf)
 
 Code is Apache-2.0. Original scholarly/government documents and their gold annotations retain their own licences and attribution conditions. Documents prepared for project submission should be licensed CC-BY-4.0 where applicable.
+
+## E1-C (v1.7) — DEV-only chunked numeric prototype
+
+New **separate candidate method**: `python3 -m src.e1c --lang de --doc-id admin_de_27 --max-calls 1`. See `docs/E1C_EXPERIMENT_V17_FR.md`. The original E0-PJQ method and checkpoints are unchanged. E1-C is not yet part of the final `make run` submission path.

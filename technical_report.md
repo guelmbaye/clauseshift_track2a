@@ -49,3 +49,6 @@ Technical report CC-BY-4.0. Code Apache-2.0.
 - https://aclanthology.org/2026.acl-long.1437.pdf
 - https://github.com/ZurichNLP/SwissGov-RSD
 - https://github.com/HackApertus/project-template/tree/main/track_2a
+
+### E1-C experimental candidate — development only
+A separate chunked method with proportional token windows, bilingual context and numeric-only JSON responses is implemented. It must not be conflated with the published prompting baseline. No SwissGov-RSD performance result has yet been observed. A DEV-only exploratory matched-ID Spearman helper is included, and its result is not the official competition metric. Final submission integration and Docker reproduction remain to be implemented after a methodology is selected and frozen.
