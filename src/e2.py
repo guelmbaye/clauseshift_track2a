@@ -50,9 +50,9 @@ def scoring_prompt(args,ta,tb,ra,rb,need_a,need_b):
     raise ValueError('Unknown prompt variant')
 
 
-def fingerprint(args,model,url):
+def fingerprint(args,model,url,split='dev'):
     data={'version':VERSION,'model':model,'endpoint':url,'prompt':args.prompt,
-          'context':args.context,'max_tokens':args.max_tokens,'split':'dev',
+          'context':args.context,'max_tokens':args.max_tokens,'split':split,
           'alignment':args.alignment,'chunk_tokens':args.chunk_tokens,
           'embedding_model':args.embedding_model,'embedding_revision':args.embedding_revision,
           'max_unit_tokens':args.max_unit_tokens,
@@ -61,6 +61,8 @@ def fingerprint(args,model,url):
         data['max_scores_per_call']=args.max_scores_per_call
     if args.alignment=='semantic_coverage':
         data.update(coverage_weight=args.coverage_weight,anchor_bonus=args.anchor_bonus)
+    if split=='final':
+        data['frozen_commit']=getattr(args,'frozen_commit','')
     return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
 
 
@@ -137,7 +139,15 @@ def completed_document(row,plan,state):
     return pred
 
 
-def run(args,infer=chat_completion,embedder=None):
+def run(args,infer=chat_completion,embedder=None,*,split='dev'):
+    if split not in ('dev','final'):
+        raise ValueError('Unknown split')
+    if split=='final':
+        if not getattr(args,'_frozen_authorized',False):
+            raise ValueError('Held-out data forbidden without frozen-manifest authorization')
+        if (args.lang!='all' or args.doc_id or args.max_calls or args.max_documents
+                or args.shortest_first or args.plan_only):
+            raise ValueError('Final mode cannot be partial, reordered or plan-only')
     if args.context<0 or args.max_calls<0 or args.max_documents<0 or args.max_attempts_per_unit<1:
         raise ValueError('Invalid context, max-calls, max-documents or attempts')
     if getattr(args,'max_scores_per_call',0) not in (0, *range(2,129)):
@@ -153,17 +163,17 @@ def run(args,infer=chat_completion,embedder=None):
     key=os.environ.get('LLM_API_KEY','')
     if not args.plan_only and ('apertus' not in model.lower() or not endpoint):
         raise ValueError('Set Apertus LLM_NAME and LLM_BASE_URL')
-    sig=fingerprint(args,model,endpoint)
+    sig=fingerprint(args,model,endpoint,split)
     host=urlsplit(endpoint).hostname or '<none>'
-    print(f'[E2 DEV ONLY] alignment={args.alignment} prompt={args.prompt} model={model or "not-needed-for-plan"} signature={sig[:12]}',flush=True)
+    print(f'[E2 {split.upper()}] alignment={args.alignment} prompt={args.prompt} model={model or "not-needed-for-plan"} signature={sig[:12]}',flush=True)
     calls=0
     langs=LANGS if args.lang=='all' else (args.lang,)
     for lang in langs:
-        path=Path(args.input_dir)/f'dev_{lang}.jsonl'
+        path=Path(args.input_dir)/f'{split}_{lang}.jsonl'
         allrows=list(load_jsonl(path));validate_input_rows(allrows)
         if args.doc_id and not any(r['id']==args.doc_id for r in allrows):
-            raise ValueError(f'{args.doc_id} is not a DEV {lang} document')
-        cp=Path(args.checkpoint_dir)/f'dev_{lang}_e2.checkpoint.jsonl'
+            raise ValueError(f'{args.doc_id} is not a {split.upper()} {lang} document')
+        cp=Path(args.checkpoint_dir)/f'{split}_{lang}_e2.checkpoint.jsonl'
         cp.parent.mkdir(parents=True,exist_ok=True)
         ordered=(sorted(allrows,key=lambda r:(len(r['text_a'].split())+len(r['text_b'].split()),r['id']))
                  if args.shortest_first else allrows)
@@ -174,6 +184,7 @@ def run(args,infer=chat_completion,embedder=None):
                 if args.doc_id and row['id']!=args.doc_id:continue
                 if args.max_documents and count_done>=args.max_documents:break
                 pl_path=plan_path(args.plan_dir,lang,row['id'])
+                if split=='final':pl_path=pl_path.with_name('final_'+pl_path.name)
                 plan=save_or_load_plan(pl_path,row,args,embedder=embedder)
                 summary=alignment_summary(plan,row)
                 print(f'[E2 PLAN] {lang}/{row["id"]} units={summary["units"]} '
@@ -214,7 +225,7 @@ def run(args,infer=chat_completion,embedder=None):
                                        max_tokens=args.max_tokens,retries=args.retries)
                             sa,sb=parse_partial(text,core_a,core_b,request_a,request_b)
                         except (InferenceError,PredictionError,ValueError) as exc:
-                            if text is not None:
+                            if text is not None and split=='dev':
                                 raw_sha=hashlib.sha256(text.encode()).hexdigest()[:12]
                                 dest=Path(args.diagnostics_dir)/(f'dev_{lang}_{row["id"]}_e2_{unit_i}_{time.time_ns()}_{raw_sha}.txt')
                                 dest.parent.mkdir(parents=True,exist_ok=True)
@@ -239,16 +250,29 @@ def run(args,infer=chat_completion,embedder=None):
             completed=[]
             for row in allrows:
                 pl=plan_path(args.plan_dir,lang,row['id'])
+                if split=='final':pl=pl.with_name('final_'+pl.name)
                 if not pl.exists():
                     completed.append(None);continue
                 plan=save_or_load_plan(pl,row,args,embedder=embedder)
                 state=read_document_updates(cp,sig,row,plan)
                 completed.append(completed_document(row,plan,state))
-            print(f'[E2 STATUS] {lang}: {sum(x is not None for x in completed)}/{len(allrows)} DEV complete',flush=True)
+            n_complete=sum(x is not None for x in completed)
+            print(f'[E2 STATUS] {lang}: {n_complete}/{len(allrows)} {split.upper()} complete',flush=True)
+            if split=='final' and n_complete!=len(allrows):
+                raise ValueError(f'Incomplete FINAL predictions: {lang}: {n_complete}/{len(allrows)}')
             if all(x is not None for x in completed):
                 dst=Path(args.output_dir)/f'CLAUSESHIFT_admin_{lang}.jsonl.jsonl'
-                write_jsonl(dst,completed)
-                print(f'[E2 FULL DEV EXPORT] {dst}',flush=True)
+                if split=='final':
+                    dst.parent.mkdir(parents=True,exist_ok=True)
+                    tmp=dst.with_name(dst.name+'.partial')
+                    try:
+                        write_jsonl(tmp,completed)
+                        os.replace(tmp,dst)
+                    finally:
+                        if tmp.exists():tmp.unlink()
+                else:
+                    write_jsonl(dst,completed)
+                print(f'[E2 FULL {split.upper()} EXPORT] {dst}',flush=True)
     return 0
 
 

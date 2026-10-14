@@ -14,7 +14,7 @@ SWISSGOV_ROOT ?=
 build:
 	docker build -t "$(IMAGE)" .
 
-# Official clean-checkout entry point: frozen E0-PJQ or E2-BATCH, full-order outputs, Docker.
+# Official clean-checkout entry point: frozen E0-PJQ, E2-SINGLE or E2-BATCH, full-order outputs, Docker.
 # No gold-based test evaluation or tuning. Requires a committed freeze manifest.
 run: build
 	@mkdir -p data/inputs out/predictions out/checkpoints
@@ -39,7 +39,7 @@ freeze:
 	  --method "$(METHOD)" --embedding-revision "$(EMB_SHA)" \
 	  --batch-cap "$(BATCH_CAP)" --units-per-batch "$(UNITS_PER_BATCH)" \
 	  --workers "$(WORKERS)" --launch-interval "$(LAUNCH_INTERVAL)" \
-	  --max-tokens $(if $(filter E2-BATCH,$(METHOD)),1536,4096)
+	  --max-tokens $(if $(filter E2-BATCH E2-SINGLE,$(METHOD)),1536,4096)
 preflight:
 	python3 -m src.submission preflight
 prepare-dev:

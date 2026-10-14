@@ -20,6 +20,7 @@ BASE = Path(__file__).resolve().parent.parent
 MANIFEST = BASE / 'docs' / 'submission_frozen.json'
 METHOD = 'E0-PJQ'
 BATCH_METHOD = 'E2-BATCH'
+SINGLE_METHOD = 'E2-SINGLE'  # Validated indexed per-unit format (no multi-unit JSON)
 BATCH_SCHEMA_KEYS = {'alignment','prompt','embedding_model','embedding_revision',
  'chunk_tokens','max_unit_tokens','similarity_threshold','merge_penalty',
  'coverage_weight','anchor_bonus','context','max_scores_per_call',
@@ -62,9 +63,9 @@ def freeze(manifest, upstream_sha, frozen_commit, model, max_tokens=4096, timeou
     path = Path(manifest)
     if path.exists():
         raise ValueError('Frozen manifest already exists: refuse overwrite')
-    if method not in (METHOD,BATCH_METHOD):
+    if method not in (METHOD,BATCH_METHOD,SINGLE_METHOD):
         raise ValueError('Unknown submission method')
-    if method==BATCH_METHOD:
+    if method in (BATCH_METHOD,SINGLE_METHOD):
         if not re.fullmatch(r'[a-f0-9]{40}',embedding_revision.lower()):
             raise ValueError('Pin a full 40-character HF model revision for batching')
         if not 2<=batch_cap<=128 or not 1<=units_per_batch<=16 or not 1<=workers<=8 or launch_interval<0:
@@ -85,9 +86,9 @@ def freeze(manifest, upstream_sha, frozen_commit, model, max_tokens=4096, timeou
         'syntax_repair': True,
         'boundary_quote_repair': True,
     }
-    if method==BATCH_METHOD:
+    if method in (BATCH_METHOD,SINGLE_METHOD):
         payload.update(punctuation_repair=False,syntax_repair=False,boundary_quote_repair=False)
-        payload['schema']=2
+        payload['schema']=3 if method==SINGLE_METHOD else 2
         payload['e2']={
             'alignment':'semantic_coverage','prompt':'fewshot',
             'embedding_model':'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
@@ -95,7 +96,7 @@ def freeze(manifest, upstream_sha, frozen_commit, model, max_tokens=4096, timeou
             'chunk_tokens':48,'max_unit_tokens':48,'similarity_threshold':0.46,
             'merge_penalty':0.06,'coverage_weight':0.50,'anchor_bonus':0.35,
             'context':20,'max_scores_per_call':batch_cap,
-            'max_units_per_batch':units_per_batch,'workers':workers,
+            'max_units_per_batch':(1 if method==SINGLE_METHOD else units_per_batch),'workers':(1 if method==SINGLE_METHOD else workers),
             'launch_interval':float(launch_interval),'max_attempts_per_unit':8,
         }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,9 +115,10 @@ def preflight(manifest=MANIFEST, *, require_secrets=False):
                 'prompt_file','prompt_sha256','max_tokens','timeout','retries',
                 'punctuation_repair','syntax_repair','boundary_quote_repair'}
     batch=(data.get('schema')==2 and data.get('method')==BATCH_METHOD)
-    if batch:
+    single=(data.get('schema')==3 and data.get('method')==SINGLE_METHOD)
+    if batch or single:
         if set(data) != expected | {'e2'} or not isinstance(data.get('e2'),dict):
-            raise ValueError('Unexpected batched-manifest schema')
+            raise ValueError('Unexpected E2-manifest schema')
         e2=data['e2']
         if set(e2)!=BATCH_SCHEMA_KEYS or e2['alignment']!='semantic_coverage' or e2['prompt']!='fewshot':
             raise ValueError('Frozen batched method cannot be changed')
@@ -126,6 +128,8 @@ def preflight(manifest=MANIFEST, *, require_secrets=False):
             not 1<=e2['workers']<=8 or e2['launch_interval']<0 or
             e2['max_attempts_per_unit']<1):
             raise ValueError('Invalid frozen E2 settings')
+        if single and (e2['max_units_per_batch'] != 1 or e2['workers'] != 1):
+            raise ValueError('Single-unit method cannot use batching or concurrency')
     elif set(data) != expected or data.get('schema') != 1 or data.get('method') != METHOD:
         raise ValueError('Unexpected frozen-manifest schema or method')
     if not re.fullmatch(r'[a-f0-9]{40}', data['upstream_sha']):
@@ -138,7 +142,7 @@ def preflight(manifest=MANIFEST, *, require_secrets=False):
     if data['code_sha256'] != code_digest():
         raise ValueError('Submission code changed after freeze')
     flags=(data['punctuation_repair'],data['syntax_repair'],data['boundary_quote_repair'])
-    if flags != ((False,False,False) if batch else (True,True,True)):
+    if flags != ((False,False,False) if (batch or single) else (True,True,True)):
         raise ValueError('Frozen repair configuration differs from selected method')
     if type(data['max_tokens']) is not int or data['max_tokens'] < 512:
         raise ValueError('Invalid max_tokens')
@@ -169,7 +173,24 @@ def run_final(manifest=MANIFEST):
             p.unlink()
     cli.do_fetch_final(SimpleNamespace(upstream_sha=data['upstream_sha'], input_dir=input_dir,
                                        confirm_final=True, frozen_commit=data['frozen_commit']))
-    if data['method']==BATCH_METHOD:
+    if data['method']==SINGLE_METHOD:
+        from . import e2
+        settings=dict(data['e2'])
+        settings.pop('max_units_per_batch')
+        settings.pop('workers')
+        settings.pop('launch_interval')
+        settings.update(lang='all',doc_id='',input_dir=input_dir,output_dir=output_dir,
+                        checkpoint_dir=BASE/'out'/'checkpoints'/'final_e2single_v1143',
+                        plan_dir=BASE/'out'/'plans'/'final_e2single_v1143',
+                        diagnostics_dir=BASE/'out'/'diagnostics',
+                        timeout=data['timeout'],max_tokens=data['max_tokens'],
+                        retries=data['retries'],max_calls=0,max_documents=0,
+                        shortest_first=False,plan_only=False,
+                        frozen_commit=data['frozen_commit'],_frozen_authorized=True)
+        status=e2.run(SimpleNamespace(**settings),split='final')
+        if status:
+            raise ValueError('Single-unit final inference failed; no successful final submission')
+    elif data['method']==BATCH_METHOD:
         from . import e2_batch
         settings=dict(data['e2'])
         settings.update(lang='all',doc_id='',input_dir=input_dir,output_dir=output_dir,
@@ -198,7 +219,7 @@ def run_final(manifest=MANIFEST):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Frozen E0-PJQ or E2-BATCH submission (final data only after freeze)')
+    parser = argparse.ArgumentParser(description='Frozen E0-PJQ, E2-SINGLE or E2-BATCH submission (final data only after freeze)')
     cmd = parser.add_subparsers(dest='action',required=True)
     f = cmd.add_parser('freeze')
     f.add_argument('--upstream-sha',required=True)
@@ -207,7 +228,7 @@ def main(argv=None):
     f.add_argument('--max-tokens',type=int,default=4096)
     f.add_argument('--timeout',type=float,default=75)
     f.add_argument('--retries',type=int,default=0)
-    f.add_argument('--method',choices=[METHOD,BATCH_METHOD],default=METHOD)
+    f.add_argument('--method',choices=[METHOD,BATCH_METHOD,SINGLE_METHOD],default=METHOD)
     f.add_argument('--embedding-revision',default=os.environ.get('EMB_SHA',''))
     f.add_argument('--batch-cap',type=int,default=96)
     f.add_argument('--units-per-batch',type=int,default=3)
