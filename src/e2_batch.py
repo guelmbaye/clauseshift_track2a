@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import sys
 import time
@@ -128,12 +129,42 @@ def parse_batch(text, row, plan, batch):
     return results
 
 
+def save_invalid_batch_response(args, row, batch, raw):
+    """DEV-only diagnostics; never save partial scores or expose API keys.
+
+    The raw model output may contain input text; files are owner-only and
+    must stay in the ignored out/ directory, never in a submission artifact.
+    """
+    directory = Path(getattr(args, 'diagnostics_dir', ROOT / 'out' / 'diagnostics'))
+    directory.mkdir(parents=True, exist_ok=True)
+    doc_id = re.sub(r'[^A-Za-z0-9_.-]', '_', str(row['id']))[:80]
+    batch_id = '-'.join(str(i + 1) for i, _, _ in batch)
+    suffix = hashlib.sha256(raw.encode('utf-8')).hexdigest()[:12]
+    filename = f'dev_{args.lang}_{doc_id}_units_{batch_id}_{time.time_ns()}_{suffix}.txt'
+    path = directory / filename
+    # Exclusive creation prevents concurrent workers overwriting diagnostics.
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        handle.write(raw)
+    return path
+
+
 def _call_batch(args, row, plan, batch, endpoint, model, key, infer):
     prompt=batch_prompt(args,row,plan,batch)
     start=time.monotonic()
     raw=infer(endpoint,model,prompt,key,timeout=args.timeout,
               max_tokens=args.max_tokens,retries=args.retries)
-    data=parse_batch(raw,row,plan,batch)
+    try:
+        data=parse_batch(raw,row,plan,batch)
+    except PredictionError as exc:
+        # In final mode, do not create a DEV diagnostic from held-out text.
+        if getattr(args, '_batch_split', 'dev') != 'dev':
+            raise
+        try:
+            diagnostic=save_invalid_batch_response(args,row,batch,raw)
+        except OSError as save_exc:
+            raise PredictionError(f'{exc} [raw diagnostic could not be saved: {type(save_exc).__name__}]') from exc
+        raise PredictionError(f'{exc} [raw diagnostic saved: {diagnostic}]') from exc
     return data,round(time.monotonic()-start,2),len(raw)
 
 
@@ -177,6 +208,9 @@ def run_dataset(args, *, split='dev', infer=chat_completion, embedder=None):
     key=os.environ.get('LLM_API_KEY','')
     if not args.plan_only and ('apertus' not in model.lower() or not endpoint or not key):
         raise ValueError('Apertus model, endpoint and API key required')
+    # Distinguish diagnostics of DEV and held-out execution; do not change
+    # the signed scoring/checkpoint configuration.
+    args._batch_split=split
     sig=signature(args,model,endpoint,split)
     print(f'[BATCH {split.upper()}] signature={sig[:12]} cap={args.max_scores_per_call} '
           f'units/call<={args.max_units_per_batch} workers={args.workers}',flush=True)
@@ -308,6 +342,7 @@ def main(argv=None):
     p.add_argument('--max-attempts-per-unit',type=int,default=8)
     p.add_argument('--shortest-first',action='store_true')
     p.add_argument('--plan-only',action='store_true')
+    p.add_argument('--diagnostics-dir',type=Path,default=ROOT/'out'/'diagnostics')
     args=p.parse_args(argv)
     try:return run_dataset(args)
     except (ValueError,FileNotFoundError,RuntimeError,PredictionError) as exc:

@@ -1,0 +1,280 @@
+diff --git a/docs/BATCH_JSON_DIAGNOSTIC_V1141_FR.md b/docs/BATCH_JSON_DIAGNOSTIC_V1141_FR.md
+new file mode 100644
+index 0000000..bfaf105
+--- /dev/null
++++ b/docs/BATCH_JSON_DIAGNOSTIC_V1141_FR.md
+@@ -0,0 +1,52 @@
++# CLAUSESHIFT V1.14.1 — Diagnostic des JSON batchés (DEV uniquement)
++
++## Échec observé
++
++`admin_de_132`, V1.14, `units=[1,2,3]`, 96 scores, `Invalid JSON: Extra data: line 1 column 622 (char 621)`.
++
++Un `Extra data` signifie que le parseur a terminé une valeur JSON et rencontré autre chose ensuite. Il peut s'agir d'un second objet JSON ou de texte supplémentaire ; **la sortie exacte n'a pas été sauvegardée par V1.14**, et on ne doit pas supposer sa forme.
++
++## Changements minimaux
++
++- Aucune modification du prompt, du modèle, du plan d'alignement, de la signature de score ou du format de checkpoint V1.14.
++- Sur erreur de validation du JSON uniquement en mode DEV, la réponse intégrale est enregistrée dans `out/diagnostics` avec permissions `0600`. Pas d'écriture partielle en checkpoint.
++- Analyse hors ligne de la structure avec `tools.inspect_batch_raw`. Pas de lecture gold/test/final, pas d'appel réseau.
++- Sur le chemin `final`, aucune sauvegarde brute DEV n'est autorisée.
++
++## Installation
++
++```
++cd /var/www/clauseshift_track2a
++git apply --check CLAUSESHIFT_Batch_Raw_Diagnostic_v1.14.1.patch
++git apply CLAUSESHIFT_Batch_Raw_Diagnostic_v1.14.1.patch
++python3 -m unittest discover -s tests -q
++```
++
++## Inspection — après un **seul** nouvel appel instrumenté
++
++Le premier appel d'avant le patch a été perdu ; une reproduction instrumentée est nécessaire pour obtenir la sortie brute. Ne pas enchaîner plusieurs appels identiques.
++
++```
++python3 -m src.e2_batch \
++  --lang de --doc-id admin_de_132 \
++  --alignment semantic_coverage --prompt fewshot \
++  --embedding-revision "$EMB_SHA" \
++  --max-scores-per-call 96 --max-units-per-batch 3 \
++  --workers 1 --max-tokens 1536 --timeout 75 --retries 0 --max-calls 1 \
++  --plan-dir out/plans/batch_dev_v114 \
++  --checkpoint-dir out/checkpoints/batch_dev_v114
++```
++
++Si invalidité : récupérer le chemin affiché après `[raw diagnostic saved: ...]` et lancer :
++
++```
++python3 -m tools.inspect_batch_raw --raw-file '/chemin/exact/du/fichier.txt'
++```
++
++Ne pas publier le fichier brut entier ; il peut contenir des extraits du corpus. Transmettre seulement la sortie structurée de l'outil.
++
++Si la réponse a été acceptée, ne pas exécuter d'autre appel ; inspecter le checkpoint pour démontrer les unités validées.
++
++## Limites
++
++Ce patch n'améliore pas la qualité du modèle, n'assouplit pas la validation et ne résout pas les faux non-alignements visibles dans le plan de `admin_de_132` (continuation allemande en unité 2, `Fachkontakt`/`Specialist staff`). Ne pas geler E2-BATCH avant correction/validation sur DEV et test du conteneur complet.
+diff --git a/src/e2_batch.py b/src/e2_batch.py
+index bc2f85c..a212f98 100644
+--- a/src/e2_batch.py
++++ b/src/e2_batch.py
+@@ -9,6 +9,7 @@ import hashlib
+ import json
+ import math
+ import os
++import re
+ from pathlib import Path
+ import sys
+ import time
+@@ -128,12 +129,42 @@ def parse_batch(text, row, plan, batch):
+     return results
+ 
+ 
++def save_invalid_batch_response(args, row, batch, raw):
++    """DEV-only diagnostics; never save partial scores or expose API keys.
++
++    The raw model output may contain input text; files are owner-only and
++    must stay in the ignored out/ directory, never in a submission artifact.
++    """
++    directory = Path(getattr(args, 'diagnostics_dir', ROOT / 'out' / 'diagnostics'))
++    directory.mkdir(parents=True, exist_ok=True)
++    doc_id = re.sub(r'[^A-Za-z0-9_.-]', '_', str(row['id']))[:80]
++    batch_id = '-'.join(str(i + 1) for i, _, _ in batch)
++    suffix = hashlib.sha256(raw.encode('utf-8')).hexdigest()[:12]
++    filename = f'dev_{args.lang}_{doc_id}_units_{batch_id}_{time.time_ns()}_{suffix}.txt'
++    path = directory / filename
++    # Exclusive creation prevents concurrent workers overwriting diagnostics.
++    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
++    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
++        handle.write(raw)
++    return path
++
++
+ def _call_batch(args, row, plan, batch, endpoint, model, key, infer):
+     prompt=batch_prompt(args,row,plan,batch)
+     start=time.monotonic()
+     raw=infer(endpoint,model,prompt,key,timeout=args.timeout,
+               max_tokens=args.max_tokens,retries=args.retries)
+-    data=parse_batch(raw,row,plan,batch)
++    try:
++        data=parse_batch(raw,row,plan,batch)
++    except PredictionError as exc:
++        # In final mode, do not create a DEV diagnostic from held-out text.
++        if getattr(args, '_batch_split', 'dev') != 'dev':
++            raise
++        try:
++            diagnostic=save_invalid_batch_response(args,row,batch,raw)
++        except OSError as save_exc:
++            raise PredictionError(f'{exc} [raw diagnostic could not be saved: {type(save_exc).__name__}]') from exc
++        raise PredictionError(f'{exc} [raw diagnostic saved: {diagnostic}]') from exc
+     return data,round(time.monotonic()-start,2),len(raw)
+ 
+ 
+@@ -177,6 +208,9 @@ def run_dataset(args, *, split='dev', infer=chat_completion, embedder=None):
+     key=os.environ.get('LLM_API_KEY','')
+     if not args.plan_only and ('apertus' not in model.lower() or not endpoint or not key):
+         raise ValueError('Apertus model, endpoint and API key required')
++    # Distinguish diagnostics of DEV and held-out execution; do not change
++    # the signed scoring/checkpoint configuration.
++    args._batch_split=split
+     sig=signature(args,model,endpoint,split)
+     print(f'[BATCH {split.upper()}] signature={sig[:12]} cap={args.max_scores_per_call} '
+           f'units/call<={args.max_units_per_batch} workers={args.workers}',flush=True)
+@@ -308,6 +342,7 @@ def main(argv=None):
+     p.add_argument('--max-attempts-per-unit',type=int,default=8)
+     p.add_argument('--shortest-first',action='store_true')
+     p.add_argument('--plan-only',action='store_true')
++    p.add_argument('--diagnostics-dir',type=Path,default=ROOT/'out'/'diagnostics')
+     args=p.parse_args(argv)
+     try:return run_dataset(args)
+     except (ValueError,FileNotFoundError,RuntimeError,PredictionError) as exc:
+diff --git a/tests/test_batch_raw_diagnostics_v1141.py b/tests/test_batch_raw_diagnostics_v1141.py
+new file mode 100644
+index 0000000..a8067e6
+--- /dev/null
++++ b/tests/test_batch_raw_diagnostics_v1141.py
+@@ -0,0 +1,62 @@
++"""Mock-only tests for fail-closed diagnostics, with no real API calls."""
++import json
++import os
++from pathlib import Path
++import tempfile
++import unittest
++from unittest.mock import patch
++
++from src.core import write_jsonl, load_jsonl
++from src.e2_batch import run_dataset
++from tests.test_e2_batch_v114 import opts, response
++from tools.inspect_batch_raw import analyze_raw
++
++
++class TestBatchDiagnostics(unittest.TestCase):
++    def test_inspector_understands_two_objects(self):
++        x=analyze_raw('{"units":{"0":{}}}{"units":{"1":{}}}')
++        self.assertTrue(x['valid_prefix'])
++        self.assertEqual(x['extra_type'],'second_json_value')
++        self.assertEqual(x['prefix_unit_keys'],['0'])
++        self.assertEqual(x['second_unit_keys'],['1'])
++
++    def test_inspector_understands_commentary(self):
++        x=analyze_raw('{"units":{}} More scores below')
++        self.assertEqual(x['extra_type'],'other_text_or_value')
++
++    def test_invalid_batch_saves_raw_owner_only_no_checkpoint(self):
++        with tempfile.TemporaryDirectory() as d:
++            root=Path(d)
++            write_jsonl(root/'data'/'dev_de.jsonl',
++                        [{'id':'id_1','text_a':'one two three four five six seven eight',
++                          'text_b':'eins zwei drei vier funf sechs sieben acht'}])
++            args=opts(root,doc_id='id_1',max_calls=1,max_documents=1,
++                      max_scores_per_call=16,diagnostics_dir=root/'diagnostics')
++            def bad(*a,**kw):return response(*a,**kw)+'{"additional":true}'
++            with patch.dict(os.environ,{'LLM_NAME':'swiss-ai/apertus-v1.5-8b',
++                                        'LLM_BASE_URL':'https://mock.example/v1',
++                                        'LLM_API_KEY':'dummy'}):
++                self.assertEqual(run_dataset(args,infer=bad),1)
++            raws=list((root/'diagnostics').glob('*.txt'))
++            self.assertEqual(len(raws),1)
++            self.assertEqual(raws[0].stat().st_mode & 0o777,0o600)
++            self.assertEqual(analyze_raw(raws[0].read_text())['extra_type'],'second_json_value')
++            cp=root/'checkpoints'/'dev_de_e2batch.checkpoint.jsonl'
++            self.assertFalse(cp.exists() and cp.read_text().strip())
++
++    def test_valid_batch_does_not_save_raw(self):
++        with tempfile.TemporaryDirectory() as d:
++            root=Path(d)
++            write_jsonl(root/'data'/'dev_de.jsonl',
++                        [{'id':'id_1','text_a':'one two three four',
++                          'text_b':'eins zwei drei vier'}])
++            args=opts(root,doc_id='id_1',max_calls=1,max_documents=1,
++                      diagnostics_dir=root/'diagnostics')
++            with patch.dict(os.environ,{'LLM_NAME':'swiss-ai/apertus-v1.5-8b',
++                                        'LLM_BASE_URL':'https://mock.example/v1',
++                                        'LLM_API_KEY':'dummy'}):
++                self.assertEqual(run_dataset(args,infer=response),0)
++            self.assertFalse((root/'diagnostics').exists())
++
++
++if __name__=='__main__':unittest.main()
+diff --git a/tools/inspect_batch_raw.py b/tools/inspect_batch_raw.py
+new file mode 100644
+index 0000000..e376137
+--- /dev/null
++++ b/tools/inspect_batch_raw.py
+@@ -0,0 +1,74 @@
++"""Read-only diagnostics for malformed DEV batch model responses.
++
++Never emits source text or scores; shows structural characteristics only.
++Does not load benchmark annotations, API credentials or checkpoints.
++"""
++import argparse
++import json
++from pathlib import Path
++
++
++def analyze_raw(raw):
++    text = raw.strip()
++    result = {'length': len(raw), 'starts_with_fence': text.startswith('```')}
++    try:
++        full = json.loads(text)
++    except json.JSONDecodeError as exc:
++        result['json_error'] = exc.msg
++        result['error_offset'] = exc.pos
++        result['error_at_end'] = exc.pos >= len(text) - 30
++    else:
++        result['full_json_valid'] = True
++        result['root_type'] = type(full).__name__
++        if isinstance(full, dict):
++            result['root_keys'] = sorted(map(str,full))
++            if isinstance(full.get('units'), dict):
++                result['unit_keys'] = sorted(map(str, full['units']))
++        return result
++    try:
++        obj,end = json.JSONDecoder().raw_decode(text)
++    except json.JSONDecodeError:
++        result['valid_prefix'] = False
++        return result
++    extra = text[end:].strip()
++    result['valid_prefix'] = True
++    result['prefix_type'] = type(obj).__name__
++    result['prefix_length'] = end
++    if isinstance(obj,dict):
++        result['prefix_keys'] = sorted(map(str,obj))
++        if isinstance(obj.get('units'),dict):
++            result['prefix_unit_keys'] = sorted(map(str,obj['units']))
++    result['extra_length'] = len(extra)
++    if not extra:
++        result['extra_type'] = 'whitespace_only'
++    elif extra.startswith('{'):
++        try:
++            second, second_end = json.JSONDecoder().raw_decode(extra)
++        except json.JSONDecodeError:
++            result['extra_type'] = 'incomplete_or_malformed_object'
++        else:
++            result['extra_type'] = 'second_json_value'
++            result['second_type'] = type(second).__name__
++            result['second_length'] = second_end
++            if isinstance(second,dict):
++                result['second_keys'] = sorted(map(str,second))
++                if isinstance(second.get('units'),dict):
++                    result['second_unit_keys'] = sorted(map(str, second['units']))
++            result['after_second_length'] = len(extra[second_end:].strip())
++    elif extra.startswith('```'):
++        result['extra_type'] = 'markdown_fence'
++    else:
++        result['extra_type'] = 'other_text_or_value'
++    return result
++
++
++def main(argv=None):
++    p=argparse.ArgumentParser(description='Inspect malformed DEV batch output structure offline')
++    p.add_argument('--raw-file',type=Path,required=True)
++    a=p.parse_args(argv)
++    text=a.raw_file.read_text(encoding='utf-8')
++    print('[DEV RAW STRUCTURE] '+json.dumps(analyze_raw(text),sort_keys=True))
++    print('[READ ONLY] No score exported, no checkpoint changed, no API request')
++
++
++if __name__=='__main__':main()
