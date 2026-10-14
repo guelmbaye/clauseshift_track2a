@@ -24,7 +24,7 @@ from .e2_alignment import save_or_load_plan, alignment_summary
 from .inference import chat_completion, InferenceError
 
 ROOT=Path(__file__).resolve().parent.parent
-VERSION='clauseshift-e2-batch-v114-1'
+VERSION='clauseshift-e2-batch-v114-2-schema-consistent-fewshot'
 
 
 def signature(args, model, endpoint, split='dev'):
@@ -77,6 +77,32 @@ def candidate_batches(row, plan, state, cap, unit_limit):
     return batches
 
 
+def batch_fewshot():
+    """Keep the paper-adapted similarity demonstrations but make every
+    demonstration use the EXACT multi-unit output schema.
+
+    This transforms illustrative outputs only; it does not infer scores or
+    modify the scoring scale. The three existing example values are preserved.
+    """
+    lines=[]
+    for line in FEWSHOT.strip().splitlines():
+        if line.startswith('Output: '):
+            original=json.loads(line[len('Output: '):])
+            if set(original)!={'a','b'}:
+                raise ValueError('Unexpected score-example schema')
+            line='Output: '+json.dumps({'units':{'0':original}},separators=(',',':'))
+        lines.append(line)
+    lines.extend([
+        'Every Output above demonstrates the EXACT output JSON envelope for one unit.',
+        'If there are multiple units, put ALL requested units in that SAME single object.',
+        'Two-unit schema example with unit IDs 0 and 1 (toy scores):',
+        '{"units":{"0":{"a":{"0":5},"b":{"0":5}},"1":{"a":{"1":0},"b":{}}}}',
+        'Do not generate any root keys besides "units"; do not generate consecutive JSON objects.',
+        'The toy example above does NOT specify the actual units or token indices.',
+    ])
+    return '\n'.join(lines)
+
+
 def batch_prompt(args, row, plan, batch):
     ta,tb=row['text_a'].split(),row['text_b'].split()
     payload=[]
@@ -105,7 +131,7 @@ def batch_prompt(args, row, plan, batch):
           'or extra indices. Never score punctuation. No markdown, no prose. '
           'Payload:\n'+json.dumps({'units':payload},ensure_ascii=False,separators=(',',':'))
           +'\nReturn JSON only:')
-    return ('The next examples illustrate only the similarity SCALE, not the output JSON STRUCTURE of this multi-unit task.\n'+FEWSHOT+'\n'+base) if args.prompt=='fewshot' else base
+    return (batch_fewshot()+'\n'+base) if args.prompt=='fewshot' else base
 
 
 def parse_batch(text, row, plan, batch):
